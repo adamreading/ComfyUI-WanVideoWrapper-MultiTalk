@@ -2625,6 +2625,7 @@ class WanVideoSampler:
                 "fantasytalking_embeds": ("FANTASYTALKING_EMBEDS", ),
                 "uni3c_embeds": ("UNI3C_EMBEDS", ),
                 "multitalk_embeds": ("MULTITALK_EMBEDS", ),
+                "progressive_ref": ("BOOLEAN", {"default": False, "tooltip": "Use progressive reference frames"}),
             }
         }
 
@@ -2634,10 +2635,10 @@ class WanVideoSampler:
     CATEGORY = "WanVideoWrapper"
 
     def process(self, model, image_embeds, shift, steps, cfg, seed, scheduler, riflex_freq_index, text_embeds=None,
-        force_offload=True, samples=None, feta_args=None, denoise_strength=1.0, context_options=None, 
-        cache_args=None, teacache_args=None, flowedit_args=None, batched_cfg=False, slg_args=None, rope_function="default", loop_args=None, 
-        experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None):
-        
+        force_offload=True, samples=None, feta_args=None, denoise_strength=1.0, context_options=None,
+        cache_args=None, teacache_args=None, flowedit_args=None, batched_cfg=False, slg_args=None, rope_function="default", loop_args=None,
+        experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None, progressive_ref=False):
+
         patcher = model
         model = model.model
         transformer = model.diffusion_model
@@ -2648,6 +2649,10 @@ class WanVideoSampler:
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
+
+        progressive_buffer = None
+        x0 = None
+        prev_window = None
         
         steps = int(steps/denoise_strength)
 
@@ -2978,6 +2983,7 @@ class WanVideoSampler:
             minimax_mask_latents = minimax_mask_latents.to(device, dtype)
 
         is_looped = False
+        progressive_buffer = None
         if context_options is not None:
             def create_window_mask(noise_pred_context, c, latent_video_length, context_overlap, looped=False):
                 window_mask = torch.ones_like(noise_pred_context)
@@ -3003,6 +3009,9 @@ class WanVideoSampler:
             context_vae = context_options.get("vae", None)
             if context_vae is not None:
                 context_vae.to(device)
+
+            if progressive_ref:
+                progressive_buffer = ProgressiveReferenceBuffer(device)
 
             self.window_tracker = WindowTracker(verbose=context_options["verbose"])
 
@@ -3562,8 +3571,9 @@ class WanVideoSampler:
         except:
             pass
 
+        prev_window = None
         #region main loop start
-        for idx, t in enumerate(tqdm(timesteps)):    
+        for idx, t in enumerate(tqdm(timesteps)):
             if flowedit_args is not None:
                 if idx < skip_steps:
                     continue
@@ -3635,6 +3645,9 @@ class WanVideoSampler:
                                 partial_img_emb = source_image_cond[:, c, :, :]
                                 partial_img_emb[:, 0, :, :] = source_image_cond[:, 0, :, :].to(intermediate_device)
 
+                            if progressive_buffer is not None and partial_img_emb is not None:
+                                partial_img_emb = progressive_buffer.inject(partial_img_emb, c)
+
                             partial_zt_src = zt_src[:, c, :, :]
                             vt_src_context, new_teacache = predict_with_cfg(
                                 partial_zt_src, cfg[idx], 
@@ -3649,6 +3662,8 @@ class WanVideoSampler:
                             vt_src[:, c, :, :] += vt_src_context * window_mask
                             counter[:, c, :, :] += window_mask
                         vt_src /= counter
+                        if progressive_buffer is not None:
+                            prev_window = context_queue[-1]
                     else:
                         vt_src, self.cache_state_source = predict_with_cfg(
                             zt_src, cfg[idx], 
@@ -3689,6 +3704,8 @@ class WanVideoSampler:
                         if image_cond is not None:
                             partial_img_emb = image_cond[:, c, :, :]
                             partial_img_emb[:, 0, :, :] = image_cond[:, 0, :, :].to(intermediate_device)
+                            if progressive_buffer is not None:
+                                partial_img_emb = progressive_buffer.inject(partial_img_emb, c)
                         if control_latents is not None:
                             partial_control_latents = control_latents[:, c, :, :]
 
@@ -3706,6 +3723,8 @@ class WanVideoSampler:
                         vt_tgt[:, c, :, :] += vt_tgt_context * window_mask
                         counter[:, c, :, :] += window_mask
                     vt_tgt /= counter
+                    if progressive_buffer is not None:
+                        prev_window = context_queue[-1]
                 else:
                     vt_tgt, self.cache_state = predict_with_cfg(
                         zt_tgt, cfg[idx], 
@@ -3747,6 +3766,8 @@ class WanVideoSampler:
                     if image_cond is not None:
                         partial_img_emb = image_cond[:, c]
                         partial_img_emb[:, 0] = image_cond[:, 0].to(intermediate_device)
+                        if progressive_buffer is not None:
+                            partial_img_emb = progressive_buffer.inject(partial_img_emb, c)
 
                         if control_latents is not None:
                             partial_control_latents = control_latents[:, c]
@@ -3810,6 +3831,8 @@ class WanVideoSampler:
                     counter[:, c] += window_mask
                     context_pbar.update(1)
                 noise_pred /= counter
+                if progressive_buffer is not None:
+                    prev_window = context_queue[-1]
             #region normal inference
             else:
                 noise_pred, self.cache_state = predict_with_cfg(
@@ -3843,6 +3866,7 @@ class WanVideoSampler:
                 latent = temp_x0.squeeze(0)
 
                 x0 = latent.to(device)
+                log.debug(f"x0 assigned at step {idx} with shape {getattr(x0, 'shape', 'unknown')}")
                 if callback is not None:
                     if recammaster is not None:
                         callback_latent = (latent_model_input[:, :orig_noise_len].to(device) - noise_pred[:, :orig_noise_len].to(device) * t.to(device) / 1000).detach().permute(1,0,2,3)
@@ -3861,7 +3885,11 @@ class WanVideoSampler:
                 else:
                     pbar.update(1)
 
-        if phantom_latents is not None:
+            if progressive_buffer is not None and x0 is not None and prev_window is not None:
+                log.debug(f"Storing progressive latents for window {prev_window} at step {idx}")
+                progressive_buffer.store(x0, prev_window)
+
+        if phantom_latents is not None and x0 is not None:
             x0 = x0[:,:-phantom_latents.shape[1]]
                 
         if cache_args is not None:
@@ -3892,7 +3920,11 @@ class WanVideoSampler:
             pass
 
         return ({
-            "samples": x0.unsqueeze(0).cpu(), "looped": is_looped, "end_image": end_image if not fun_or_fl2v_model else None, "has_ref": has_ref, "drop_last": drop_last,
+            "samples": x0.unsqueeze(0).cpu() if x0 is not None else None,
+            "looped": is_looped,
+            "end_image": end_image if not fun_or_fl2v_model else None,
+            "has_ref": has_ref,
+            "drop_last": drop_last,
             }, )
     
 class WindowTracker:
@@ -3917,6 +3949,56 @@ class WindowTracker:
                 log.info(f"Initializing persistent teacache for window {window_id}")
             self.cache_states[window_id] = base_state.copy()
         return self.cache_states[window_id]
+
+class ProgressiveReferenceBuffer:
+    """Buffer to store and inject progressive reference latents."""
+
+    def __init__(self, device, frames_to_store=6):
+        self.device = device
+        self.frames_to_store = frames_to_store
+        self.buffer = {}
+
+    def store(self, latents, window_indices):
+        """Store the last ``frames_to_store`` latents from ``window_indices``."""
+        if latents is None:
+            log.warning(f"Attempted to store None latents for window {window_indices}")
+            return
+        if not hasattr(latents, "shape"):
+            log.warning(f"Latents object has no shape attribute for window {window_indices}")
+            return
+        log.debug(f"Storing latents shape: {latents.shape} for window {window_indices}")
+        if not window_indices:
+            return
+        end_indices = window_indices[-self.frames_to_store:]
+        for idx in end_indices:
+            if idx < latents.shape[1]:
+                self.buffer[idx] = latents[:, idx].detach().to(self.device)
+
+    def inject(self, partial_latents, window_indices):
+        """Replace frames in ``partial_latents`` if a buffered latent exists."""
+        log.debug(f"Injection target shape: {partial_latents.shape}")
+        for i, global_idx in enumerate(window_indices):
+            if global_idx in self.buffer:
+                stored = self.buffer[global_idx]
+                log.debug(f"Buffer latent shape: {stored.shape} for index {global_idx}")
+                if stored.shape[0] != partial_latents.shape[0]:
+                    log.warning(
+                        f"Shape mismatch: stored {stored.shape} vs target {partial_latents[:, i].shape}. Adjusting"
+                    )
+                    if stored.shape[0] < partial_latents.shape[0]:
+                        pad = partial_latents.shape[0] - stored.shape[0]
+                        stored = torch.cat(
+                            [stored, torch.zeros(pad, *stored.shape[1:], device=stored.device, dtype=stored.dtype)],
+                            dim=0,
+                        )
+                    else:
+                        stored = stored[: partial_latents.shape[0]]
+                partial_latents[:, i] = stored.to(partial_latents.device, partial_latents.dtype)
+        return partial_latents
+
+    def clear(self):
+        self.buffer.clear()
+        torch.cuda.empty_cache()
 
 #region VideoDecode
 class WanVideoDecode:
