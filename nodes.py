@@ -3662,6 +3662,8 @@ class WanVideoSampler:
                             vt_src[:, c, :, :] += vt_src_context * window_mask
                             counter[:, c, :, :] += window_mask
                         vt_src /= counter
+                        if progressive_buffer is not None:
+                            prev_window = context_queue[-1]
                     else:
                         vt_src, self.cache_state_source = predict_with_cfg(
                             zt_src, cfg[idx], 
@@ -3725,6 +3727,8 @@ class WanVideoSampler:
                         vt_tgt[:, c, :, :] += vt_tgt_context * window_mask
                         counter[:, c, :, :] += window_mask
                     vt_tgt /= counter
+                    if progressive_buffer is not None:
+                        prev_window = context_queue[-1]
                 else:
                     vt_tgt, self.cache_state = predict_with_cfg(
                         zt_tgt, cfg[idx], 
@@ -3835,6 +3839,8 @@ class WanVideoSampler:
                     counter[:, c] += window_mask
                     context_pbar.update(1)
                 noise_pred /= counter
+                if progressive_buffer is not None:
+                    prev_window = context_queue[-1]
             #region normal inference
             else:
                 noise_pred, self.cache_state = predict_with_cfg(
@@ -3869,6 +3875,7 @@ class WanVideoSampler:
 
                 x0 = latent.to(device)
                 if progressive_buffer is not None and prev_window is not None:
+                    log.debug(f"Storing progressive latents for window {prev_window} at step {idx}")
                     progressive_buffer.store(x0, prev_window)
                 if callback is not None:
                     if recammaster is not None:
