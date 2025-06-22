@@ -3878,9 +3878,8 @@ class WanVideoSampler:
                 latent = temp_x0.squeeze(0)
 
                 x0 = latent.to(device)
-                if progressive_buffer is not None and x0 is not None and prev_window is not None:
-                    log.debug(f"Storing progressive latents for window {prev_window} at step {idx}")
-                    progressive_buffer.store(x0, prev_window)
+                log.debug(f"x0 assigned at step {idx} with shape {getattr(x0, 'shape', 'unknown')}")
+
                 if callback is not None:
                     if recammaster is not None:
                         callback_latent = (latent_model_input[:, :orig_noise_len].to(device) - noise_pred[:, :orig_noise_len].to(device) * t.to(device) / 1000).detach().permute(1,0,2,3)
@@ -3898,6 +3897,10 @@ class WanVideoSampler:
                     callback(idx, callback_latent, None, steps)
                 else:
                     pbar.update(1)
+
+            if progressive_buffer is not None and x0 is not None and prev_window is not None:
+                log.debug(f"Storing progressive latents for window {prev_window} at step {idx}")
+                progressive_buffer.store(x0, prev_window)
 
         if phantom_latents is not None and x0 is not None:
             x0 = x0[:,:-phantom_latents.shape[1]]
@@ -3970,6 +3973,12 @@ class ProgressiveReferenceBuffer:
 
     def store(self, latents, window_indices):
         """Store the last ``frames_to_store`` latents from ``window_indices``."""
+        if latents is None:
+            log.warning(f"Attempted to store None latents for window {window_indices}")
+            return
+        if not hasattr(latents, "shape"):
+            log.warning(f"Latents object has no shape attribute for window {window_indices}")
+            return
         if not window_indices:
             return
         end_indices = window_indices[-self.frames_to_store:]
