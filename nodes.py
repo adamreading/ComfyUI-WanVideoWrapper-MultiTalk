@@ -2653,6 +2653,7 @@ class WanVideoSampler:
         progressive_buffer = None
         x0 = None
         prev_window = None
+        x0_clean = None
         
         steps = int(steps/denoise_strength)
 
@@ -3869,6 +3870,12 @@ class WanVideoSampler:
                 }
                 if isinstance(sample_scheduler, DEISMultistepScheduler) or isinstance(sample_scheduler, FlowMatchScheduler):
                     step_args.pop("generator", None)
+                if progressive_buffer is not None:
+                    if sample_scheduler.step_index is None:
+                        sample_scheduler._init_step_index(t)
+                    sigma_t = sample_scheduler.sigmas[sample_scheduler.step_index]
+                    x0_clean = (latent_model_input - sigma_t * noise_pred).to(device)
+                    log.debug(f"captured x0_clean shape {getattr(x0_clean, 'shape', 'unknown')} at step {idx}")
                 temp_x0 = sample_scheduler.step(
                     noise_pred[:, :orig_noise_len].unsqueeze(0) if recammaster is not None else noise_pred.unsqueeze(0),
                     t,
@@ -3897,9 +3904,9 @@ class WanVideoSampler:
                 else:
                     pbar.update(1)
 
-            if progressive_buffer is not None and x0 is not None and prev_window is not None:
+            if progressive_buffer is not None and x0_clean is not None and prev_window is not None:
                 log.debug(f"Storing progressive latents for window {prev_window} at step {idx}")
-                progressive_buffer.store(x0, prev_window)
+                progressive_buffer.store(x0_clean, prev_window)
 
         if phantom_latents is not None and x0 is not None:
             x0 = x0[:,:-phantom_latents.shape[1]]
