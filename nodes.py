@@ -3879,7 +3879,6 @@ class WanVideoSampler:
 
                 x0 = latent.to(device)
                 log.debug(f"x0 assigned at step {idx} with shape {getattr(x0, 'shape', 'unknown')}")
-
                 if callback is not None:
                     if recammaster is not None:
                         callback_latent = (latent_model_input[:, :orig_noise_len].to(device) - noise_pred[:, :orig_noise_len].to(device) * t.to(device) / 1000).detach().permute(1,0,2,3)
@@ -3979,6 +3978,7 @@ class ProgressiveReferenceBuffer:
         if not hasattr(latents, "shape"):
             log.warning(f"Latents object has no shape attribute for window {window_indices}")
             return
+        log.debug(f"Storing latents shape: {latents.shape} for window {window_indices}")
         if not window_indices:
             return
         end_indices = window_indices[-self.frames_to_store:]
@@ -3988,9 +3988,24 @@ class ProgressiveReferenceBuffer:
 
     def inject(self, partial_latents, window_indices):
         """Replace frames in ``partial_latents`` if a buffered latent exists."""
+        log.debug(f"Injection target shape: {partial_latents.shape}")
         for i, global_idx in enumerate(window_indices):
             if global_idx in self.buffer:
-                partial_latents[:, i] = self.buffer[global_idx].to(partial_latents.device, partial_latents.dtype)
+                stored = self.buffer[global_idx]
+                log.debug(f"Buffer latent shape: {stored.shape} for index {global_idx}")
+                if stored.shape[0] != partial_latents.shape[0]:
+                    log.warning(
+                        f"Shape mismatch: stored {stored.shape} vs target {partial_latents[:, i].shape}. Adjusting"
+                    )
+                    if stored.shape[0] < partial_latents.shape[0]:
+                        pad = partial_latents.shape[0] - stored.shape[0]
+                        stored = torch.cat(
+                            [stored, torch.zeros(pad, *stored.shape[1:], device=stored.device, dtype=stored.dtype)],
+                            dim=0,
+                        )
+                    else:
+                        stored = stored[: partial_latents.shape[0]]
+                partial_latents[:, i] = stored.to(partial_latents.device, partial_latents.dtype)
         return partial_latents
 
     def clear(self):
