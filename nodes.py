@@ -3620,6 +3620,10 @@ class WanVideoSampler:
                         vt_src = torch.zeros_like(zt_src, device=intermediate_device)
                         context_queue = list(context(idx, steps, latent_video_length, context_frames, context_stride, context_overlap))
                         for c in context_queue:
+                            if progressive_buffer is not None:
+                                if prev_window is not None and c[0] > prev_window[0]:
+                                    progressive_buffer.store(x0, prev_window)
+                                prev_window = c
                             window_id = self.window_tracker.get_window_id(c)
 
                             if cache_args is not None:
@@ -3679,6 +3683,10 @@ class WanVideoSampler:
                     vt_tgt = torch.zeros_like(zt_tgt, device=intermediate_device)
                     context_queue = list(context(idx, steps, latent_video_length, context_frames, context_stride, context_overlap))
                     for c in context_queue:
+                        if progressive_buffer is not None:
+                            if prev_window is not None and c[0] > prev_window[0]:
+                                progressive_buffer.store(x0, prev_window)
+                            prev_window = c
                         window_id = self.window_tracker.get_window_id(c)
 
                         if cache_args is not None:
@@ -3740,6 +3748,10 @@ class WanVideoSampler:
                 context_queue = list(context(idx, steps, latent_video_length, context_frames, context_stride, context_overlap))
                 context_pbar = ProgressBar(len(context_queue))
                 for i, c in enumerate(context_queue):
+                    if progressive_buffer is not None:
+                        if prev_window is not None and c[0] > prev_window[0]:
+                            progressive_buffer.store(x0, prev_window)
+                        prev_window = c
                     window_id = self.window_tracker.get_window_id(c)
                     
                     if cache_args is not None:
