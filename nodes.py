@@ -2635,10 +2635,10 @@ class WanVideoSampler:
     CATEGORY = "WanVideoWrapper"
 
     def process(self, model, image_embeds, shift, steps, cfg, seed, scheduler, riflex_freq_index, text_embeds=None,
-        force_offload=True, samples=None, feta_args=None, denoise_strength=1.0, context_options=None, 
-        cache_args=None, teacache_args=None, flowedit_args=None, batched_cfg=False, slg_args=None, rope_function="default", loop_args=None, 
+        force_offload=True, samples=None, feta_args=None, denoise_strength=1.0, context_options=None,
+        cache_args=None, teacache_args=None, flowedit_args=None, batched_cfg=False, slg_args=None, rope_function="default", loop_args=None,
         experimental_args=None, sigmas=None, unianimate_poses=None, fantasytalking_embeds=None, uni3c_embeds=None, multitalk_embeds=None, progressive_ref=False):
-        
+
         patcher = model
         model = model.model
         transformer = model.diffusion_model
@@ -2649,6 +2649,10 @@ class WanVideoSampler:
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
+
+        progressive_buffer = None
+        x0 = None
+        prev_window = None
         
         steps = int(steps/denoise_strength)
 
@@ -3874,7 +3878,7 @@ class WanVideoSampler:
                 latent = temp_x0.squeeze(0)
 
                 x0 = latent.to(device)
-                if progressive_buffer is not None and prev_window is not None:
+                if progressive_buffer is not None and x0 is not None and prev_window is not None:
                     log.debug(f"Storing progressive latents for window {prev_window} at step {idx}")
                     progressive_buffer.store(x0, prev_window)
                 if callback is not None:
@@ -3895,7 +3899,7 @@ class WanVideoSampler:
                 else:
                     pbar.update(1)
 
-        if phantom_latents is not None:
+        if phantom_latents is not None and x0 is not None:
             x0 = x0[:,:-phantom_latents.shape[1]]
                 
         if cache_args is not None:
@@ -3926,7 +3930,11 @@ class WanVideoSampler:
             pass
 
         return ({
-            "samples": x0.unsqueeze(0).cpu(), "looped": is_looped, "end_image": end_image if not fun_or_fl2v_model else None, "has_ref": has_ref, "drop_last": drop_last,
+            "samples": x0.unsqueeze(0).cpu() if x0 is not None else None,
+            "looped": is_looped,
+            "end_image": end_image if not fun_or_fl2v_model else None,
+            "has_ref": has_ref,
+            "drop_last": drop_last,
             }, )
     
 class WindowTracker:
